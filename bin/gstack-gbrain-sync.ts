@@ -408,7 +408,7 @@ function runBrainSyncPush(args: CliArgs): StageResult {
     return { name: "brain-sync", ran: false, ok: true, duration_ms: 0, summary: "would: gstack-brain-sync --discover-new --once" };
   }
 
-  const brainSyncPath = join(HOME, ".claude", "skills", "gstack", "bin", "gstack-brain-sync");
+  const brainSyncPath = join(import.meta.dir, "gstack-brain-sync");
   if (!existsSync(brainSyncPath)) {
     return { name: "brain-sync", ran: false, ok: true, duration_ms: 0, summary: "skipped (gstack-brain-sync not installed)" };
   }
