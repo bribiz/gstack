@@ -1,0 +1,126 @@
+name: Sync upstream gstack → cfe-main
+
+# Runs weekly on Sunday at 03:00 UTC (offset from gbrain to avoid overlap), or on demand.
+# Fetches garrytan/gstack main, merges into cfe-main.
+# On clean merge: auto-pushes. On conflicts: opens a PR for manual resolution.
+# Note: gstack has no test suite to run — we just verify the merge is clean.
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — merge locally, report result, do not push'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout cfe-main
+        uses: actions/checkout@v4
+        with:
+          ref: cfe-main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/garrytan/gstack.git || true
+          git fetch upstream main
+
+      - name: Check for new upstream commits
+        id: check
+        run: |
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          MERGE_BASE=$(git merge-base HEAD upstream/main)
+          if [ "$UPSTREAM_SHA" = "$MERGE_BASE" ]; then
+            echo "already_up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "cfe-main is already up to date with upstream/main"
+          else
+            echo "already_up_to_date=false" >> "$GITHUB_OUTPUT"
+            echo "New upstream commits since last merge:"
+            git log --oneline "$MERGE_BASE..upstream/main"
+          fi
+
+      - name: Attempt merge
+        id: merge
+        if: steps.check.outputs.already_up_to_date != 'true'
+        run: |
+          git merge upstream/main --no-edit -m "chore: merge upstream gstack $(git rev-parse --short upstream/main)" || true
+          if git ls-files --unmerged | grep -q .; then
+            echo "merge_status=conflict" >> "$GITHUB_OUTPUT"
+          else
+            echo "merge_status=clean" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push clean merge
+        if: |
+          steps.merge.outputs.merge_status == 'clean' &&
+          steps.check.outputs.already_up_to_date != 'true' &&
+          inputs.dry_run != 'true'
+        run: |
+          git push origin cfe-main
+          echo "✅ Merged upstream/main into cfe-main and pushed."
+
+      - name: Open conflict PR
+        if: steps.merge.outputs.merge_status == 'conflict'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${context.repo.owner}:sync/upstream-conflict`
+            });
+            if (prs.length > 0) {
+              console.log('Conflict PR already open:', prs[0].html_url);
+              return;
+            }
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '⚠️ Upstream sync conflict — manual resolution required',
+              head: 'sync/upstream-conflict',
+              base: 'cfe-main',
+              body: [
+                '## Upstream gstack sync conflict',
+                '',
+                'The weekly sync from `garrytan/gstack:main` into `cfe-main` hit merge conflicts.',
+                '',
+                '### To resolve',
+                '```bash',
+                'git fetch upstream',
+                'git checkout cfe-main',
+                'git merge upstream/main',
+                '# fix conflicts',
+                'git add -A && git commit',
+                'git push origin cfe-main',
+                '```',
+                '',
+                'After resolving, close this PR (do not merge it).',
+              ].join('\n')
+            });
+            console.log('Opened conflict PR:', pr.html_url);
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Sync result" >> $GITHUB_STEP_SUMMARY
+          echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Already up to date | ${{ steps.check.outputs.already_up_to_date }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Merge | ${{ steps.merge.outputs.merge_status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dry run | ${{ inputs.dry_run }} |" >> $GITHUB_STEP_SUMMARY
